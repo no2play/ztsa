@@ -22,9 +22,13 @@ if ($listOutput) {
     Write-Host $listOutput
 
     # Extract connection names from the output
-    $connections = $listOutput -split "`n" | ForEach-Object { $_ -match '"(Local Area Connection[^"]*)"' | Out-Null; $matches[1] }
+    $connections = $listOutput -split "`n" | ForEach-Object {
+        if ($_ -match '"(Local Area Connection[^"]*)"') {
+            $matches[1]
+        }
+    }
 
-    if ($connections) {
+    if ($connections -and $connections.Count -gt 0) {
         foreach ($connection in $connections) {
             Write-Host "Deleting $connection..."
             & .\tapctl.exe delete $connection

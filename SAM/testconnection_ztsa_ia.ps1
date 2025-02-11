@@ -1,4 +1,9 @@
-# Define the categories and their respective URLs
+# NOTE: The IP addresses associated with the V1 FQDNs are dynamic.
+# We cannot provide a static allowlist for firewall exceptions.
+# You may use tools like nslookup or periodically run this script
+# to retrieve the latest IP addresses.
+
+# Define categories and their respective URLs
 $categories = @{
     "Service Exceptions" = @(
         "prod.ztsaagent.trendmicro.com",
@@ -17,53 +22,103 @@ $categories = @{
         "www.google.com",
         "www.recaptcha.net"
     )
+    "Internet Access Service" = @(
+        "auth.ztsa-iag.trendmicro.com",
+        "pac.mea.ztsa-iag.trendmicro.com",
+        "auth.mea.ztsa-iag.trendmicro.com"
+    )
 }
 
-# Function to test connection
-function Test-URLConnection {
-    param (
-        [string]$URL
-    )
+# Function to resolve public IPs using the system's default DNS
+function Get-ResolvedIPs {
+    param ([string]$URL)
 
-    $result = Test-NetConnection -ComputerName $URL -Port 443 -WarningAction SilentlyContinue
-    [PSCustomObject]@{
-        URL               = $URL
-        TcpTestSucceeded  = $result.TcpTestSucceeded
-        RemoteAddress     = $result.RemoteAddress
+    try {
+        $resolvedIPs = Resolve-DnsName -Name $URL -ErrorAction Stop | 
+                       Where-Object { $_.QueryType -eq "A" } | 
+                       Select-Object -ExpandProperty IPAddress
+        
+        if ($resolvedIPs) {
+            return ($resolvedIPs | Sort-Object -Unique)  # Return unique IPs
+        } else {
+            Write-Host "    [WARNING] No IPs resolved for $URL" -ForegroundColor Yellow
+            return @()
+        }
+    }
+    catch {
+        Write-Host "    [ERROR] Failed to resolve $URL" -ForegroundColor Red
+        return @()
     }
 }
 
-# Initialize an array to store the results
-$results = @()
+# Function to test connectivity to each IP
+function Test-URLConnection {
+    param (
+        [string]$IP
+    )
+
+    $result = Test-NetConnection -ComputerName $IP -Port 443 -WarningAction SilentlyContinue
+    return [PSCustomObject]@{
+        IP                = $IP
+        TcpTestSucceeded  = $result.TcpTestSucceeded
+    }
+}
+
+# Initialize an array to store results
+$results = @{}
+$uniqueIPs = @{}
 
 # Loop through each category and test connection for its URLs
 foreach ($category in $categories.Keys) {
-    Write-Host "`nTesting category: $category" -ForegroundColor Cyan
+    Write-Host "`n[INFO] Testing category: $category" -ForegroundColor Cyan
 
     foreach ($url in $categories[$category]) {
-        $testResult = Test-URLConnection -URL $url
-        
-        # Determine color based on test success
-        if ($testResult.TcpTestSucceeded) {
-            Write-Host "  Connection to $url succeeded." -ForegroundColor Green
-        } else {
-            Write-Host "  Connection to $url failed!" -ForegroundColor Red
-        }
+        Write-Host "  [INFO] Resolving IPs for $url..."
+        $resolvedIPs = Get-ResolvedIPs -URL $url
 
-        # Add results to array
-        $results += [PSCustomObject]@{
-            Category          = $category
-            URL               = $testResult.URL
-            TcpTestSucceeded  = $testResult.TcpTestSucceeded
-            RemoteAddress     = $testResult.RemoteAddress
+        foreach ($ip in $resolvedIPs) {
+            $testResult = Test-URLConnection -IP $ip
+
+            # Determine color based on test success
+            if ($testResult.TcpTestSucceeded) {
+                Write-Host "    [SUCCESS] Connected to $ip" -ForegroundColor Green
+            } else {
+                Write-Host "    [FAILURE] Failed to connect to $ip" -ForegroundColor Red
+            }
+
+            # Store results
+            if (-not $results[$url]) {
+                $results[$url] = @()
+            }
+            $results[$url] += [PSCustomObject]@{
+                Category          = $category
+                URL               = $url
+                ResolvedIP        = $ip
+                TcpTestSucceeded  = $testResult.TcpTestSucceeded
+            }
+
+            # Add unique IPs for firewall allowlist
+            if (-not $uniqueIPs[$url]) {
+                $uniqueIPs[$url] = @()
+            }
+            if ($ip -notin $uniqueIPs[$url]) {
+                $uniqueIPs[$url] += $ip
+            }
         }
     }
 }
 
 # Display results in a structured table format
-Write-Host "`nConnection Test Results:" -ForegroundColor Green
-$results | Format-Table -Property Category, URL, TcpTestSucceeded, RemoteAddress -AutoSize
+Write-Host "`n[RESULTS] Connection Test Summary:`n" -ForegroundColor Green
+$results.Values | ForEach-Object { $_ } | Format-Table -Property Category, URL, ResolvedIP, TcpTestSucceeded -AutoSize
 
-# Optionally, export the results to a CSV file
-# $results | Export-Csv -Path "CategorizedConnectionTestResults.csv" -NoTypeInformation -Force
-# Write-Host "`nResults exported to 'CategorizedConnectionTestResults.csv'" -ForegroundColor Yellow
+# Output unique IPs for firewall allowlist
+Write-Host "`n[INFO] Unique IPs for Firewall Allowlist:" -ForegroundColor Cyan
+foreach ($url in $uniqueIPs.Keys) {
+    Write-Host "$url -> $($uniqueIPs[$url] -join ', ')"
+}
+
+# Export results to a CSV file
+$exportData = $results.Values | ForEach-Object { $_ }
+$exportData | Export-Csv -Path "ResolvedIPs.csv" -NoTypeInformation -Force
+Write-Host "`n[INFO] Results exported to 'ResolvedIPs.csv'" -ForegroundColor Yellow
